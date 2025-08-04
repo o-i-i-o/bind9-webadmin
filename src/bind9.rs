@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;  // 移除未使用的PathBuf
 use duct::cmd;
 use anyhow::{Result, Context};
 use serde::Serialize;
@@ -109,12 +109,11 @@ impl Bind9Manager {
         Ok(content)
     }
     
-    // 写入主配置文件（修复路径类型）
+    // 写入主配置文件
     pub fn write_config(&mut self, content: &str) -> Result<()> {
         fs::write(&self.config.bind9.config_path, content)
             .with_context(|| format!("Failed to write config file: {}", self.config.bind9.config_path))?;
         
-        // 设置正确的权限（转换为Path类型）
         self.set_file_permissions(Path::new(&self.config.bind9.config_path))?;
         
         Ok(())
@@ -160,7 +159,6 @@ impl Bind9Manager {
         fs::write(&zone_path, content)
             .with_context(|| format!("Failed to write zone file: {:?}", zone_path))?;
         
-        // 设置正确的权限
         self.set_file_permissions(&zone_path)?;
         
         Ok(())
