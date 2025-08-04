@@ -36,33 +36,30 @@
                 <h1>DNS Zones</h1>
                 <p class="text-muted">List of available DNS zones. Click on a zone to edit its records.</p>
                 
-                <div class="card mt-3">
+                <div class="card">
                     <div class="card-body">
-                        <table class="table table-striped">
-                            <thead>
-                                <tr>
-                                    <th>Zone Name</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
+                        {% if zones.is_empty() %}
+                            <p>No zones found in the zones directory.</p>
+                        {% else %}
+                            <ul class="list-group">
                                 {% for zone in zones %}
-                                <tr>
-                                    <td>{{ zone }}</td>
-                                    <td>
-                                        <a href="/zones/{{ zone }}" class="btn btn-sm btn-primary">Edit</a>
-                                    </td>
-                                </tr>
+                                    <li class="list-group-item">
+                                        <a href="/zones/{{ zone }}">{{ zone }}</a>
+                                    </li>
                                 {% endfor %}
-                            </tbody>
-                        </table>
+                            </ul>
+                        {% endif %}
                     </div>
+                </div>
+                
+                <div class="mt-3">
+                    <a href="/" class="btn btn-secondary">Back to Home</a>
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="/static/js/jquery-3.5.1.min.js"></script>
+    <script src="/static/js/jquery-3.7.1.min.js"></script>
     <script src="/static/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
