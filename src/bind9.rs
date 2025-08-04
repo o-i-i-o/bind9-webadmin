@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use duct::cmd;
 use anyhow::{Result, Context};
 use serde::Serialize;
@@ -109,23 +109,23 @@ impl Bind9Manager {
         Ok(content)
     }
     
-    // 写入主配置文件
+    // 写入主配置文件（修复路径类型）
     pub fn write_config(&mut self, content: &str) -> Result<()> {
         fs::write(&self.config.bind9.config_path, content)
             .with_context(|| format!("Failed to write config file: {}", self.config.bind9.config_path))?;
         
-        // 设置正确的权限
-        self.set_file_permissions(&self.config.bind9.config_path)?;
+        // 设置正确的权限（转换为Path类型）
+        self.set_file_permissions(Path::new(&self.config.bind9.config_path))?;
         
         Ok(())
     }
     
     // 列出所有区域
     pub fn list_zones(&mut self) -> Result<Vec<String>> {
-        let zones_dir = &self.config.bind9.zones_dir;
+        let zones_dir = Path::new(&self.config.bind9.zones_dir);
         
         let entries = fs::read_dir(zones_dir)
-            .with_context(|| format!("Failed to read zones directory: {}", zones_dir))?;
+            .with_context(|| format!("Failed to read zones directory: {:?}", zones_dir))?;
         
         let mut zones = Vec::new();
         
