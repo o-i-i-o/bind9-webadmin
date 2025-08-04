@@ -5,7 +5,7 @@ use actix_session::{Session, storage::CookieSessionStore, SessionMiddleware};
 use actix_files::Files;
 use serde::Deserialize;
 use std::sync::Mutex;
-use tera::Tera;
+use tera::{Tera, Context};
 use anyhow::Result;
 
 use crate::{bind9, auth, config::Config};
@@ -75,7 +75,7 @@ async fn index(data: web::Data<AppData>, session: Session) -> Result<impl Respon
     
     let status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
     
-    let mut context = tera::Context::new();
+    let mut context = Context::new();
     context.insert("title", "BIND9 Manager");
     context.insert("status", &status);
     
@@ -97,7 +97,7 @@ async fn login(data: web::Data<AppData>, session: Session) -> Result<impl Respon
             .finish());
     }
     
-    let mut context = tera::Context::new();
+    let mut context = Context::new();
     context.insert("title", "Login - BIND9 Manager");
     
     let rendered = data.tera.render("login.html", &context)
@@ -130,7 +130,7 @@ async fn authenticate(
             .append_header(("Location", "/"))
             .finish())
     } else {
-        let mut context = tera::Context::new();
+        let mut context = Context::new();
         context.insert("title", "Login - BIND9 Manager");
         context.insert("error", "Invalid username or password");
         
@@ -146,11 +146,11 @@ async fn authenticate(
 
 // 登出
 #[get("/logout")]
-async fn logout(session: Session) -> impl Responder {
+async fn logout(session: Session) -> Result<impl Responder, ActixError> {
     auth::set_authenticated(&session, false);
-    HttpResponse::Found()
+    Ok(HttpResponse::Found()
         .append_header(("Location", "/login"))
-        .finish()
+        .finish())
 }
 
 // BIND9状态
@@ -178,7 +178,7 @@ async fn config_view(data: web::Data<AppData>, session: Session) -> Result<impl 
     
     match data.bind9_manager.lock().unwrap().read_config() {
         Ok(content) => {
-            let mut context = tera::Context::new();
+            let mut context = Context::new();
             context.insert("title", "BIND9 Configuration");
             context.insert("content", &content);
             
@@ -242,7 +242,7 @@ async fn zone_list(data: web::Data<AppData>, session: Session) -> Result<impl Re
     
     match data.bind9_manager.lock().unwrap().list_zones() {
         Ok(zones) => {
-            let mut context = tera::Context::new();
+            let mut context = Context::new();
             context.insert("title", "DNS Zones");
             context.insert("zones", &zones);
             
@@ -266,7 +266,7 @@ async fn zone_list(data: web::Data<AppData>, session: Session) -> Result<impl Re
 async fn zone_view(
     data: web::Data<AppData>,
     session: Session,
-    path: web::Path<String>
+    zone: web::Path<String>
 ) -> Result<impl Responder, ActixError> {
     if !auth::is_authenticated(&session) {
         return Ok(HttpResponse::Found()
@@ -274,13 +274,13 @@ async fn zone_view(
             .finish());
     }
     
-    let zone = path.into_inner();
+    let zone_name = zone.into_inner();
     
-    match data.bind9_manager.lock().unwrap().read_zone(&zone) {
+    match data.bind9_manager.lock().unwrap().read_zone(&zone_name) {
         Ok(content) => {
-            let mut context = tera::Context::new();
-            context.insert("title", &format!("Zone: {}", zone));
-            context.insert("zone", &zone);
+            let mut context = Context::new();
+            context.insert("title", &format!("Zone: {}", zone_name));
+            context.insert("zone", &zone_name);
             context.insert("content", &content);
             
             let rendered = data.tera.render("zones/edit.html", &context)
@@ -292,7 +292,7 @@ async fn zone_view(
             Ok(HttpResponse::Ok().body(rendered))
         }
         Err(e) => {
-            log::error!("Failed to read zone {}: {}", zone, e);
+            log::error!("Failed to read zone {}: {}", zone_name, e);
             Ok(HttpResponse::InternalServerError().body(format!("Failed to read zone: {}", e)))
         }
     }
@@ -308,7 +308,7 @@ struct ZoneForm {
 async fn zone_save(
     data: web::Data<AppData>,
     session: Session,
-    path: web::Path<String>,
+    zone: web::Path<String>,
     form: web::Form<ZoneForm>
 ) -> Result<impl Responder, ActixError> {
     if !auth::is_authenticated(&session) {
@@ -317,19 +317,19 @@ async fn zone_save(
             .finish());
     }
     
-    let zone = path.into_inner();
+    let zone_name = zone.into_inner();
     
-    match data.bind9_manager.lock().unwrap().write_zone(&zone, &form.content) {
+    match data.bind9_manager.lock().unwrap().write_zone(&zone_name, &form.content) {
         Ok(_) => {
             // 通知BIND9重新加载配置
             data.bind9_manager.lock().unwrap().reload().ok();
             
             Ok(HttpResponse::Found()
-                .append_header(("Location", &format!("/zones/{}", zone)))
+                .append_header(("Location", &format!("/zones/{}", zone_name)))
                 .finish())
         }
         Err(e) => {
-            log::error!("Failed to save zone {}: {}", zone, e);
+            log::error!("Failed to save zone {}: {}", zone_name, e);
             Ok(HttpResponse::InternalServerError().body(format!("Failed to save zone: {}", e)))
         }
     }
