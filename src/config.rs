@@ -34,7 +34,7 @@ pub struct Config {
 }
 
 impl Config {
-    // 从文件加载配置
+    // 从文件加载配置（使用toml crate）
     pub fn from_file(path: &str) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path))?;
