@@ -6,9 +6,12 @@ use crate::config::Config;
 // 会话密钥
 const AUTHENTICATED_KEY: &str = "authenticated";
 
-// 检查用户是否已认证
+// 检查用户是否已认证（修复类型不匹配）
 pub fn is_authenticated(session: &Session) -> bool {
-    session.get::<bool>(AUTHENTICATED_KEY).unwrap_or(false)
+    // 正确处理session.get的返回值（Result<Option<bool>, ...>）
+    session.get::<bool>(AUTHENTICATED_KEY)
+        .unwrap_or(None)  // 处理获取失败的情况
+        .unwrap_or(false) // 未认证时返回false
 }
 
 // 设置用户认证状态
