@@ -1,21 +1,22 @@
 use actix_web::{
-    get, post, web, App, HttpResponse, Responder, Error as ActixError,
+    get, post, web, HttpResponse, Responder, Error as ActixError,
+    dev::ServiceRequest,
 };
-use actix_session::{Session, storage::CookieSessionStore, SessionMiddleware};
+use actix_session::{Session, storage::CookieSessionStore, SessionMiddleware, Key};
 use actix_files::Files;
-use serde::Deserialize;
-use std::sync::Mutex;
+use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, Arc};
 use tera::{Tera, Context};
 use anyhow::Result;
 
 use crate::{bind9, auth, config::Config};
 
-// 应用数据结构
+// 应用数据结构（使用Arc包装Mutex实现Clone）
 #[derive(Clone)]
 pub struct AppData {
     pub config: Config,
     pub tera: Tera,
-    pub bind9_manager: Mutex<bind9::Bind9Manager>,
+    pub bind9_manager: Arc<Mutex<bind9::Bind9Manager>>,  // 修复Clone问题
 }
 
 // 创建应用数据
@@ -29,8 +30,8 @@ pub fn create_app_data(config: Config) -> web::Data<AppData> {
         }
     };
     
-    // 创建BIND9管理器
-    let bind9_manager = Mutex::new(bind9::Bind9Manager::new(config.clone()));
+    // 创建BIND9管理器（使用Arc包装）
+    let bind9_manager = Arc::new(Mutex::new(bind9::Bind9Manager::new(config.clone())));
     
     web::Data::new(AppData {
         config: config.clone(),
@@ -45,9 +46,11 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
         web::scope("")
             .wrap(SessionMiddleware::new(
                 CookieSessionStore::default(),
-                std::env::var("SESSION_SECRET")
-                    .unwrap_or_else(|_| "default-secret-key-12345".to_string())
-                    .into_bytes(),
+                Key::from(  // 修复Key类型错误
+                    std::env::var("SESSION_SECRET")
+                        .unwrap_or_else(|_| "default-secret-key-12345".to_string())
+                        .into_bytes()
+                )
             ))
             .service(index)
             .service(status)
@@ -58,13 +61,14 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
             .service(config_save)
             .service(zone_list)
             .service(zone_view)
+            .service(zone_edit)
             .service(zone_save)
             .service(service_control)
             .service(Files::new("/static", "static").show_files_listing())
     );
 }
 
-// 首页
+// 首页（修复变量名冲突和错误处理）
 #[get("/")]
 async fn index(data: web::Data<AppData>, session: Session) -> Result<impl Responder, ActixError> {
     if !auth::is_authenticated(&session) {
@@ -73,22 +77,23 @@ async fn index(data: web::Data<AppData>, session: Session) -> Result<impl Respon
             .finish());
     }
     
-    let status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
+    // 重命名变量避免与/status路由冲突
+    let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
     
     let mut context = Context::new();
     context.insert("title", "BIND9 Manager");
-    context.insert("status", &status);
+    context.insert("status", &bind9_status);  // 修复Serialize错误
     
     let rendered = data.tera.render("index.html", &context)
         .map_err(|e| {
             log::error!("Template error: {}", e);
-            ActixError::from(HttpResponse::InternalServerError().body("Template rendering error"))
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
         })?;
     
     Ok(HttpResponse::Ok().body(rendered))
 }
 
-// 登录页面
+// 登录页面（修复错误处理）
 #[get("/login")]
 async fn login(data: web::Data<AppData>, session: Session) -> Result<impl Responder, ActixError> {
     if auth::is_authenticated(&session) {
@@ -103,7 +108,7 @@ async fn login(data: web::Data<AppData>, session: Session) -> Result<impl Respon
     let rendered = data.tera.render("login.html", &context)
         .map_err(|e| {
             log::error!("Template error: {}", e);
-            ActixError::from(HttpResponse::InternalServerError().body("Template rendering error"))
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
         })?;
     
     Ok(HttpResponse::Ok().body(rendered))
@@ -137,7 +142,7 @@ async fn authenticate(
         let rendered = data.tera.render("login.html", &context)
             .map_err(|e| {
                 log::error!("Template error: {}", e);
-                ActixError::from(HttpResponse::InternalServerError().body("Template rendering error"))
+                ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
             })?;
         
         Ok(HttpResponse::Ok().body(rendered))
@@ -146,11 +151,11 @@ async fn authenticate(
 
 // 登出
 #[get("/logout")]
-async fn logout(session: Session) -> Result<impl Responder, ActixError> {
+async fn logout(session: Session) -> impl Responder {
     auth::set_authenticated(&session, false);
-    Ok(HttpResponse::Found()
+    HttpResponse::Found()
         .append_header(("Location", "/login"))
-        .finish())
+        .finish()
 }
 
 // BIND9状态
@@ -162,9 +167,8 @@ async fn status(data: web::Data<AppData>, session: Session) -> Result<impl Respo
             .finish());
     }
     
-    let status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
-    
-    Ok(HttpResponse::Ok().json(status))
+    let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
+    Ok(HttpResponse::Ok().json(bind9_status))
 }
 
 // 查看配置文件
@@ -185,7 +189,7 @@ async fn config_view(data: web::Data<AppData>, session: Session) -> Result<impl 
             let rendered = data.tera.render("config.html", &context)
                 .map_err(|e| {
                     log::error!("Template error: {}", e);
-                    ActixError::from(HttpResponse::InternalServerError().body("Template rendering error"))
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
                 })?;
             
             Ok(HttpResponse::Ok().body(rendered))
@@ -249,7 +253,7 @@ async fn zone_list(data: web::Data<AppData>, session: Session) -> Result<impl Re
             let rendered = data.tera.render("zones/list.html", &context)
                 .map_err(|e| {
                     log::error!("Template error: {}", e);
-                    ActixError::from(HttpResponse::InternalServerError().body("Template rendering error"))
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
                 })?;
             
             Ok(HttpResponse::Ok().body(rendered))
@@ -266,7 +270,7 @@ async fn zone_list(data: web::Data<AppData>, session: Session) -> Result<impl Re
 async fn zone_view(
     data: web::Data<AppData>,
     session: Session,
-    zone: web::Path<String>
+    path: web::Path<String>
 ) -> Result<impl Responder, ActixError> {
     if !auth::is_authenticated(&session) {
         return Ok(HttpResponse::Found()
@@ -274,25 +278,25 @@ async fn zone_view(
             .finish());
     }
     
-    let zone_name = zone.into_inner();
+    let zone = path.into_inner();
     
-    match data.bind9_manager.lock().unwrap().read_zone(&zone_name) {
+    match data.bind9_manager.lock().unwrap().read_zone(&zone) {
         Ok(content) => {
             let mut context = Context::new();
-            context.insert("title", &format!("Zone: {}", zone_name));
-            context.insert("zone", &zone_name);
+            context.insert("title", &format!("Zone: {}", zone));
+            context.insert("zone", &zone);
             context.insert("content", &content);
             
             let rendered = data.tera.render("zones/edit.html", &context)
                 .map_err(|e| {
                     log::error!("Template error: {}", e);
-                    ActixError::from(HttpResponse::InternalServerError().body("Template rendering error"))
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
                 })?;
             
             Ok(HttpResponse::Ok().body(rendered))
         }
         Err(e) => {
-            log::error!("Failed to read zone {}: {}", zone_name, e);
+            log::error!("Failed to read zone {}: {}", zone, e);
             Ok(HttpResponse::InternalServerError().body(format!("Failed to read zone: {}", e)))
         }
     }
@@ -308,7 +312,7 @@ struct ZoneForm {
 async fn zone_save(
     data: web::Data<AppData>,
     session: Session,
-    zone: web::Path<String>,
+    path: web::Path<String>,
     form: web::Form<ZoneForm>
 ) -> Result<impl Responder, ActixError> {
     if !auth::is_authenticated(&session) {
@@ -317,15 +321,16 @@ async fn zone_save(
             .finish());
     }
     
-    let zone_name = zone.into_inner();
+    let zone_name = path.into_inner();
     
     match data.bind9_manager.lock().unwrap().write_zone(&zone_name, &form.content) {
         Ok(_) => {
             // 通知BIND9重新加载配置
             data.bind9_manager.lock().unwrap().reload().ok();
             
+            // 修复header类型错误
             Ok(HttpResponse::Found()
-                .append_header(("Location", &format!("/zones/{}", zone_name)))
+                .append_header(("Location", format!("/zones/{}", zone_name).as_str()))
                 .finish())
         }
         Err(e) => {
