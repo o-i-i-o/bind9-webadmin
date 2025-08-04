@@ -1,27 +1,29 @@
 use actix_web::{
     get, post, web, HttpResponse, Responder, Error as ActixError,
-    dev::ServiceRequest,
+    // 移除未使用的dev::ServiceRequest导入
 };
-use actix_session::{Session, storage::CookieSessionStore, SessionMiddleware, Key};
+use actix_session::{
+    Session, storage::CookieSessionStore, SessionMiddleware,
+    cookie::Key  // 修正Key的导入路径
+};
 use actix_files::Files;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;  // 移除未使用的Serialize
 use std::sync::{Mutex, Arc};
 use tera::{Tera, Context};
 use anyhow::Result;
 
 use crate::{bind9, auth, config::Config};
 
-// 应用数据结构（使用Arc包装Mutex实现Clone）
+// 应用数据结构
 #[derive(Clone)]
 pub struct AppData {
     pub config: Config,
     pub tera: Tera,
-    pub bind9_manager: Arc<Mutex<bind9::Bind9Manager>>,  // 修复Clone问题
+    pub bind9_manager: Arc<Mutex<bind9::Bind9Manager>>,
 }
 
 // 创建应用数据
 pub fn create_app_data(config: Config) -> web::Data<AppData> {
-    // 初始化模板引擎
     let tera = match Tera::new("templates/**/*.html") {
         Ok(t) => t,
         Err(e) => {
@@ -30,7 +32,6 @@ pub fn create_app_data(config: Config) -> web::Data<AppData> {
         }
     };
     
-    // 创建BIND9管理器（使用Arc包装）
     let bind9_manager = Arc::new(Mutex::new(bind9::Bind9Manager::new(config.clone())));
     
     web::Data::new(AppData {
@@ -40,13 +41,13 @@ pub fn create_app_data(config: Config) -> web::Data<AppData> {
     })
 }
 
-// 路由配置
+// 路由配置（移除不存在的zone_edit服务）
 pub fn config_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("")
             .wrap(SessionMiddleware::new(
                 CookieSessionStore::default(),
-                Key::from(  // 修复Key类型错误
+                Key::from(  // 使用正确导入的Key
                     std::env::var("SESSION_SECRET")
                         .unwrap_or_else(|_| "default-secret-key-12345".to_string())
                         .into_bytes()
@@ -60,15 +61,14 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
             .service(config_view)
             .service(config_save)
             .service(zone_list)
-            .service(zone_view)
-            .service(zone_edit)
+            .service(zone_view)  // 保留zone_view替代zone_edit
             .service(zone_save)
             .service(service_control)
             .service(Files::new("/static", "static").show_files_listing())
     );
 }
 
-// 首页（修复变量名冲突和错误处理）
+// 首页
 #[get("/")]
 async fn index(data: web::Data<AppData>, session: Session) -> Result<impl Responder, ActixError> {
     if !auth::is_authenticated(&session) {
@@ -77,12 +77,11 @@ async fn index(data: web::Data<AppData>, session: Session) -> Result<impl Respon
             .finish());
     }
     
-    // 重命名变量避免与/status路由冲突
     let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
     
     let mut context = Context::new();
     context.insert("title", "BIND9 Manager");
-    context.insert("status", &bind9_status);  // 修复Serialize错误
+    context.insert("status", &bind9_status);
     
     let rendered = data.tera.render("index.html", &context)
         .map_err(|e| {
@@ -93,7 +92,7 @@ async fn index(data: web::Data<AppData>, session: Session) -> Result<impl Respon
     Ok(HttpResponse::Ok().body(rendered))
 }
 
-// 登录页面（修复错误处理）
+// 登录页面
 #[get("/login")]
 async fn login(data: web::Data<AppData>, session: Session) -> Result<impl Responder, ActixError> {
     if auth::is_authenticated(&session) {
@@ -221,7 +220,6 @@ async fn config_save(
     
     match data.bind9_manager.lock().unwrap().write_config(&form.content) {
         Ok(_) => {
-            // 配置更改后建议重启服务
             data.bind9_manager.lock().unwrap().restart().ok();
             
             Ok(HttpResponse::Found()
@@ -325,10 +323,8 @@ async fn zone_save(
     
     match data.bind9_manager.lock().unwrap().write_zone(&zone_name, &form.content) {
         Ok(_) => {
-            // 通知BIND9重新加载配置
             data.bind9_manager.lock().unwrap().reload().ok();
             
-            // 修复header类型错误
             Ok(HttpResponse::Found()
                 .append_header(("Location", format!("/zones/{}", zone_name).as_str()))
                 .finish())
