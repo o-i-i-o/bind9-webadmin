@@ -1,6 +1,5 @@
 use actix_web::{App, HttpServer, middleware::Logger};
 use env_logger::Env;
-use std::sync::Mutex;
 
 mod server;
 mod bind9;
