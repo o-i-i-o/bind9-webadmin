@@ -1,0 +1,14 @@
+[server]
+address = "0.0.0.0"
+port = 8080
+
+[bind9]
+service_name = "bind9"
+binary_path = "/usr/sbin/named"
+config_path = "/etc/bind/named.conf"
+zones_dir = "/etc/bind/zones"
+
+[auth]
+username = "admin"
+# 默认密码是 'admin'，请在首次登录后更改
+password_hash = "$2b$10$VJ5VQvQZJZJZJZJZJZ.JZJZJZJZJZJZJZJZJZJZJZJZJZJZJ"
