@@ -4,17 +4,29 @@
 <div class="row">
     <div class="col-md-12">
         <div class="d-flex justify-content-between align-items-center mb-4">
-            <h1>{{ title }}</h1>
-            <button type="button" class="btn btn-danger" data-bs-toggle="modal" data-bs-target="#saveConfirmation">
-                Save Configuration
-            </button>
+            <h1>{{ t.config_title }}</h1>
+            <div>
+                <button type="button" class="btn btn-info me-2" data-bs-toggle="modal" data-bs-target="#configHelp">
+                    Help
+                </button>
+                <button type="button" class="btn btn-success me-2" data-bs-toggle="modal" data-bs-target="#validateConfig">
+                    Validate
+                </button>
+                <button type="button" class="btn btn-danger" data-bs-toggle="modal" data-bs-target="#saveConfirmation">
+                    {{ t.save }}
+                </button>
+            </div>
+        </div>
+        
+        <div class="alert alert-info">
+            {{ t.config_hint }}
         </div>
         
         <form id="configForm" action="/config/save" method="post">
             <div class="card">
                 <div class="card-body">
                     <div class="form-group">
-                        <textarea class="form-control" id="content" name="content" rows="20" style="font-family: monospace;">{{ content }}</textarea>
+                        <textarea class="form-control" id="content" name="content" rows="20" style="font-family: monospace; font-size: 14px;">{{ content }}</textarea>
                     </div>
                 </div>
             </div>
@@ -24,20 +36,94 @@
                 <div class="modal-dialog">
                     <div class="modal-content">
                         <div class="modal-header">
-                            <h5 class="modal-title">Save Configuration</h5>
+                            <h5 class="modal-title">{{ t.save }} {{ t.config_title }}</h5>
                             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                         </div>
                         <div class="modal-body">
                             <p>Are you sure you want to save the configuration? This will restart BIND9.</p>
                         </div>
                         <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                            <button type="submit" class="btn btn-primary">Save</button>
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">{{ t.cancel }}</button>
+                            <button type="submit" class="btn btn-primary">{{ t.save }}</button>
                         </div>
                     </div>
                 </div>
             </div>
         </form>
+        
+        <!-- 验证配置对话框 -->
+        <div class="modal fade" id="validateConfig" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Validate Configuration</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="validationResult">
+                            <p>Validating configuration...</p>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">{{ t.close }}</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 帮助对话框 -->
+        <div class="modal fade" id="configHelp" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">BIND9 Configuration Help</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <h5>Common Configuration Examples</h5>
+                        <pre>
+// 基本区域配置
+zone "example.com" {
+    type master;
+    file "/etc/bind/zones/example.com.db";
+};
+
+// 转发器配置
+options {
+    forwarders {
+        8.8.8.8;
+        8.8.4.4;
+    };
+}
+                        </pre>
+                        <p>For more information, refer to the <a href="https://bind9.readthedocs.io/" target="_blank">BIND9 documentation</a>.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">{{ t.close }}</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
+
+<script>
+// 配置验证功能
+document.querySelector('[data-bs-target="#validateConfig"]').addEventListener('click', function() {
+    fetch('/config/validate', { method: 'GET' })
+        .then(response => response.text())
+        .then(result => {
+            const resultDiv = document.getElementById('validationResult');
+            if (result.includes('error')) {
+                resultDiv.innerHTML = `<div class="alert alert-danger">${result}</div>`;
+            } else {
+                resultDiv.innerHTML = `<div class="alert alert-success">${result}</div>`;
+            }
+        })
+        .catch(error => {
+            document.getElementById('validationResult').innerHTML = 
+                `<div class="alert alert-danger">Validation failed: ${error}</div>`;
+        });
+});
+</script>
 {% endblock %}
