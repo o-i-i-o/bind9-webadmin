@@ -1,9 +1,10 @@
 use actix_web::{HttpServer, App};
-use bind9_webadmin::server::{create_app_data, config_routes};
-use bind9_webadmin::config::Config;
+use server::{create_app_data, config_routes};
+use config::Config;
 use std::env;
 use log::{info, error};
 
+// 声明内部模块，而不是引用外部crate
 mod server;
 mod config;
 mod auth;
