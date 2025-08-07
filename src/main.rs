@@ -1,33 +1,43 @@
-use actix_web::{App, HttpServer, middleware::Logger};
-use env_logger::Env;
+use actix_web::{HttpServer, App};
+use bind9_webadmin::server::{create_app_data, config_routes};
+use bind9_webadmin::config::Config;
+use std::env;
+use log::{info, error};
 
 mod server;
-mod bind9;
-mod auth;
 mod config;
-
-use server::create_app_data;
-use config::Config;
+mod auth;
+mod bind9;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // 初始化日志
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::init();
     
-    // 加载配置
-    let config = Config::from_file("config.toml").expect("Failed to load configuration");
+    // 读取配置文件
+    let config_path = env::var("BIND9_WEBADMIN_CONFIG")
+        .unwrap_or_else(|_| "config.toml".to_string());
+    let config = match Config::from_file(&config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            error!("Failed to load configuration file: {}", e);
+            std::process::exit(1);
+        }
+    };
     
     // 创建应用数据
     let app_data = create_app_data(config.clone());
     
-    // 启动HTTP服务器
+    // 启动服务器
+    let server_address = format!("{}:{}", config.server.host, config.server.port);
+    info!("Starting BIND9 Web Admin on {}", server_address);
+    
     HttpServer::new(move || {
         App::new()
-            .wrap(Logger::default())
             .app_data(app_data.clone())
-            .configure(server::config_routes)
+            .configure(|cfg| config_routes(cfg, &app_data))
     })
-    .bind((config.server.address, config.server.port))?
+    .bind(&server_address)?
     .run()
     .await
 }
