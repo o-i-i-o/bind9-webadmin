@@ -14,4 +14,4 @@ service_name = "bind9"
 
 [session]
 # 请替换为你自己的32字符以上的随机密钥
-secret = "4kQqoPlg3nvUrJbPKmPjqhmJ9QTe2R81"
+secret = "4kQqoPlg3nvUrJbPKmPjqhmJ9QTe2R81EMUylDLbzlcUlbNOjzqf166ZnSCxvW5e0rK&MzcP&rQe8DCRbf8%WuaZ&q!05KFO"
