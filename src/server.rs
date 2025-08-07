@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::sync::{Mutex, Arc};
 use tera::{Tera, Context};
 
-// 导入本地模块
+// 导入本地模块（使用相对路径）
 use super::{
     bind9::Bind9Manager, 
     auth::{self, UserStore, User}, 
@@ -59,8 +59,9 @@ pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>
         web::scope("")
             .wrap(SessionMiddleware::new(
                 CookieSessionStore::default(),
+                // 修复Key::from参数类型错误，添加引用
                 Key::from(
-                    app_data.config.get_session_secret().into_bytes()
+                    &app_data.config.get_session_secret().into_bytes()
                 )
             ))
             .service(index)
@@ -568,9 +569,10 @@ async fn user_update(
         return Ok(HttpResponse::BadRequest().body("Cannot remove admin status from yourself"));
     }
     
+    // 修复移动语义错误，使用clone()
     let update = auth::UpdateUser {
         password: form.password.clone(),
-        is_admin: form.is_admin.map(|_| true).or_else(|| Some(false)),
+        is_admin: form.is_admin.clone().map(|_| true).or_else(|| Some(false)),
     };
     
     match data.user_store.update(&user_id, update) {
