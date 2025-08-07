@@ -2,6 +2,7 @@ use bcrypt::{hash, verify, DEFAULT_COST};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use actix_session::Session;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -149,7 +150,17 @@ pub fn verify_credentials(user_store: &UserStore, username: &str, password: &str
     false
 }
 
-// 生成密码哈希（用于命令行工具或初始设置）
+// 生成密码哈希
 pub fn hash_password(password: &str) -> Result<String, bcrypt::BcryptError> {
     hash(password, DEFAULT_COST)
+}
+
+// 检查用户是否已认证
+pub fn is_authenticated(session: &Session) -> bool {
+    session.get::<String>("username").is_ok()
+}
+
+// 设置用户认证状态
+pub fn set_authenticated(session: &Session, username: &str) -> Result<(), actix_session::SessionInsertError> {
+    session.insert("username", username)
 }
