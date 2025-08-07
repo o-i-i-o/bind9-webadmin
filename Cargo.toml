@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 actix-web = "4.4"
-actix-session = { version = "0.9", features = ["cookie-session-store"] }
+actix-session = { version = "0.10", features = ["cookie"] }
 actix-files = "0.6"
 tera = "1.19"
 serde = { version = "1.0", features = ["derive"] }
@@ -15,4 +15,5 @@ anyhow = "1.0"
 log = "0.4"
 env_logger = "0.10"
 rand = "0.8"
-lazy_static = "1.4"  # 用于多语言翻译映射
+lazy_static = "1.4"
+chrono = "0.4"
