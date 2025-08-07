@@ -1,13 +1,13 @@
 use actix_web::{
     get, post, web, HttpResponse, Responder, Error as ActixError,
-    // 移除未使用的dev::ServiceRequest导入
 };
 use actix_session::{
-    Session, storage::CookieSessionStore, SessionMiddleware,
-    cookie::Key  // 修正Key的导入路径
+    Session, storage::CookieSessionStore, SessionMiddleware
 };
+// 从 cookie 库直接导入 Key，而不是通过 actix_session 或 actix_web
+use cookie::Key;
 use actix_files::Files;
-use serde::Deserialize;  // 移除未使用的Serialize
+use serde::Deserialize;
 use std::sync::{Mutex, Arc};
 use tera::{Tera, Context};
 use anyhow::Result;
@@ -41,15 +41,15 @@ pub fn create_app_data(config: Config) -> web::Data<AppData> {
     })
 }
 
-// 路由配置（移除不存在的zone_edit服务）
+// 路由配置
 pub fn config_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("")
             .wrap(SessionMiddleware::new(
                 CookieSessionStore::default(),
-                Key::from(  // 使用正确导入的Key
-                    std::env::var("SESSION_SECRET")
-                        .unwrap_or_else(|_| "default-secret-key-12345".to_string())
+                Key::from(
+                    &std::env::var("SESSION_SECRET")
+                        .unwrap_or_else(|_| "default-secret-key-12345678901234567890123456789012".to_string())
                         .into_bytes()
                 )
             ))
@@ -61,7 +61,7 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
             .service(config_view)
             .service(config_save)
             .service(zone_list)
-            .service(zone_view)  // 保留zone_view替代zone_edit
+            .service(zone_view)
             .service(zone_save)
             .service(service_control)
             .service(Files::new("/static", "static").show_files_listing())
