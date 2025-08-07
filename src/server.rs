@@ -1,7 +1,61 @@
-// 在原有基础上添加以下修改
-use super::i18n::{Language, self};
+use actix_web::{
+    get, post, web, HttpResponse, Responder, Error as ActixError, HttpRequest,
+};
+use actix_session::{
+    Session, SessionMiddleware, storage::CookieStore
+};
+use actix_web::cookie::{Key, SameSite};
+use actix_files::Files;
+use serde::Deserialize;
+use std::sync::{Mutex, Arc};
+use tera::{Tera, Context};
+use log::{error, info};
 
-// 添加认证中间件
+// 导入本地模块
+use super::{
+    bind9::Bind9Manager, 
+    auth::{self, UserStore, User}, 
+    config::Config,
+    i18n::{Language, self}
+};
+
+// 应用数据结构
+#[derive(Clone)]
+pub struct AppData {
+    pub config: Config,
+    pub tera: Tera,
+    pub bind9_manager: Arc<Mutex<Bind9Manager>>,
+    pub user_store: UserStore,
+}
+
+// 创建应用数据
+pub fn create_app_data(config: Config) -> web::Data<AppData> {
+    let tera = match Tera::new("templates/**/*.html") {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Failed to initialize Tera: {}", e);
+            std::process::exit(1);
+        }
+    };
+    
+    let bind9_manager = Arc::new(Mutex::new(Bind9Manager::new(config.clone())));
+    
+    // 初始化用户存储并添加默认管理员
+    let user_store = UserStore::new();
+    user_store.init_default(
+        &config.auth.username,
+        &config.auth.password_hash
+    );
+    
+    web::Data::new(AppData {
+        config: config.clone(),
+        tera,
+        bind9_manager,
+        user_store,
+    })
+}
+
+// 认证中间件
 pub fn auth_middleware(
     session: Session,
     req: HttpRequest,
@@ -18,21 +72,32 @@ pub fn auth_middleware(
     Ok(())
 }
 
-// 修改路由配置，添加认证中间件
+// 路由配置
 pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>) {
     cfg.service(
         web::scope("")
-            .wrap(SessionMiddleware::new(
-                CookieSessionStore::default(),
-                Key::from(
-                    &app_data.config.get_session_secret().into_bytes()
+            .wrap(
+                SessionMiddleware::builder(
+                    CookieStore::default(),
+                    Key::from(&app_data.config.get_session_secret().into_bytes())
                 )
-            ))
+                .cookie_secure(false)  // 开发环境使用false，生产环境应改为true（需要HTTPS）
+                .cookie_http_only(true)
+                .cookie_same_site(SameSite::Lax)
+                .build()
+            )
             .service(index)
             .service(status)
             .service(login)
             .service(logout)
             .service(authenticate)
+            // 添加区域创建路由
+            .service(create_zone_form)
+            .service(create_zone)
+            .service(delete_zone)
+            .service(check_config)
+            .service(check_zone)
+            .service(view_logs)
             // 需要认证的路由
             .service(
                 web::scope("")
@@ -61,13 +126,70 @@ pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>
     );
 }
 
-// 修改登录处理，支持重定向回原页面
+// 首页
+#[get("/")]
+async fn index(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
+    
+    let mut context = Context::new();
+    context.insert("title", t.get("home_title").unwrap());
+    context.insert("status", &bind9_status);
+    context.insert("t", &t);
+    
+    let rendered = data.tera.render("index.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+// 登录页面
+#[get("/login")]
+async fn login(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
+    if auth::is_authenticated(&session) {
+        return Ok(HttpResponse::Found()
+            .append_header(("Location", "/"))
+            .finish());
+    }
+    
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    let mut context = Context::new();
+    context.insert("title", t.get("login").unwrap());
+    context.insert("t", &t);
+    
+    let rendered = data.tera.render("login.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+// 登录表单提交
+#[derive(Deserialize)]
+struct LoginForm {
+    username: String,
+    password: String,
+}
+
 #[post("/authenticate")]
 async fn authenticate(
     data: web::Data<AppData>,
     session: Session,
-    form: web::Form<LoginForm>
+    form: web::Form<LoginForm>,
+    req: HttpRequest
 ) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
     if auth::verify_credentials(&data.user_store, &form.username, &form.password) {
         auth::set_authenticated(&session, &form.username)?;
         
@@ -82,9 +204,6 @@ async fn authenticate(
             .append_header(("Location", return_url))
             .finish())
     } else {
-        let lang = Language::from_request(&data.request);
-        let t = lang.get_translations();
-        
         let mut context = Context::new();
         context.insert("title", t.get("login").unwrap());
         context.insert("error", t.get("invalid_credentials").unwrap());
@@ -92,7 +211,7 @@ async fn authenticate(
         
         let rendered = data.tera.render("login.html", &context)
             .map_err(|e| {
-                log::error!("Template error: {}", e);
+                error!("Template error: {}", e);
                 ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
             })?;
         
@@ -100,7 +219,7 @@ async fn authenticate(
     }
 }
 
-// 修改登出功能
+// 登出
 #[get("/logout")]
 async fn logout(session: Session) -> impl Responder {
     // 清除会话数据
@@ -110,9 +229,186 @@ async fn logout(session: Session) -> impl Responder {
         .finish()
 }
 
-// 修改区域列表处理，处理目录不存在的情况
+// BIND9状态API
+#[get("/status")]
+async fn status(data: web::Data<AppData>, session: Session) -> Result<impl Responder, ActixError> {
+    if !auth::is_authenticated(&session) {
+        return Ok(HttpResponse::Unauthorized().body("Not authenticated"));
+    }
+    
+    let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
+    Ok(HttpResponse::Ok().body(bind9_status))
+}
+
+// 查看配置文件
+#[get("/config")]
+async fn config_view(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    match data.bind9_manager.lock().unwrap().read_config() {
+        Ok(content) => {
+            let mut context = Context::new();
+            context.insert("title", t.get("config_title").unwrap());
+            context.insert("content", &content);
+            context.insert("t", &t);
+            context.insert("config_hint", t.get("config_hint").unwrap());
+            
+            let rendered = data.tera.render("config.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+        Err(e) => {
+            error!("Failed to read config: {}", e);
+            
+            let mut context = Context::new();
+            context.insert("title", t.get("config_title").unwrap());
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("config.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+// 保存配置文件
+#[derive(Deserialize)]
+struct ConfigForm {
+    content: String,
+}
+
+#[post("/config/save")]
+async fn config_save(
+    data: web::Data<AppData>,
+    session: Session,
+    form: web::Form<ConfigForm>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    match data.bind9_manager.lock().unwrap().write_config(&form.content) {
+        Ok(_) => {
+            // 保存后检查配置
+            let check_result = data.bind9_manager.lock().unwrap().check_config();
+            let message = match check_result {
+                Ok(msg) => msg,
+                Err(e) => format!("Saved but configuration error: {}", e),
+            };
+            
+            // 重新加载服务
+            let _ = data.bind9_manager.lock().unwrap().reload();
+            
+            let mut context = Context::new();
+            context.insert("title", t.get("config_title").unwrap());
+            context.insert("content", &form.content);
+            context.insert("message", &message);
+            context.insert("t", &t);
+            context.insert("config_hint", t.get("config_hint").unwrap());
+            
+            let rendered = data.tera.render("config.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+        Err(e) => {
+            error!("Failed to save config: {}", e);
+            
+            let mut context = Context::new();
+            context.insert("title", t.get("config_title").unwrap());
+            context.insert("content", &form.content);
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("config.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+// 检查配置
+#[get("/config/check")]
+async fn check_config(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    let result = data.bind9_manager.lock().unwrap().check_config();
+    
+    let content = data.bind9_manager.lock().unwrap().read_config().unwrap_or_default();
+    
+    let mut context = Context::new();
+    context.insert("title", t.get("config_title").unwrap());
+    context.insert("content", &content);
+    context.insert("t", &t);
+    context.insert("config_hint", t.get("config_hint").unwrap());
+    
+    match result {
+        Ok(msg) => {
+            context.insert("message", &msg);
+        }
+        Err(e) => {
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+        }
+    }
+    
+    let rendered = data.tera.render("config.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+// 查看日志
+#[get("/logs")]
+async fn view_logs(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    let logs = match data.bind9_manager.lock().unwrap().get_logs() {
+        Ok(logs) => logs,
+        Err(e) => {
+            error!("Failed to get logs: {}", e);
+            format!("{}: {}", t.get("error").unwrap(), e)
+        }
+    };
+    
+    let mut context = Context::new();
+    context.insert("title", "BIND9 Logs");
+    context.insert("logs", &logs);
+    context.insert("t", &t);
+    
+    let rendered = data.tera.render("logs.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+// 区域列表
 #[get("/zones")]
-async fn zone_list(data: web::Data<AppData>, req: HttpRequest) -> Result<impl Responder, ActixError> {
+async fn zone_list(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
@@ -125,14 +421,14 @@ async fn zone_list(data: web::Data<AppData>, req: HttpRequest) -> Result<impl Re
             
             let rendered = data.tera.render("zones/list.html", &context)
                 .map_err(|e| {
-                    log::error!("Template error: {}", e);
+                    error!("Template error: {}", e);
                     ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
                 })?;
             
             Ok(HttpResponse::Ok().body(rendered))
         }
         Err(e) => {
-            log::error!("Failed to list zones: {}", e);
+            error!("Failed to list zones: {}", e);
             
             let mut context = Context::new();
             context.insert("title", t.get("zones_title").unwrap());
@@ -141,11 +437,606 @@ async fn zone_list(data: web::Data<AppData>, req: HttpRequest) -> Result<impl Re
             
             let rendered = data.tera.render("zones/list.html", &context)
                 .map_err(|e| {
-                    log::error!("Template error: {}", e);
+                    error!("Template error: {}", e);
                     ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
                 })?;
             
             Ok(HttpResponse::Ok().body(rendered))
         }
     }
+}
+
+// 创建区域表单
+#[get("/zones/create")]
+async fn create_zone_form(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    let mut context = Context::new();
+    context.insert("title", t.get("create_zone").unwrap());
+    context.insert("action", "/zones/create");
+    context.insert("t", &t);
+    
+    let rendered = data.tera.render("zones/form.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+// 创建区域
+#[derive(Deserialize)]
+struct CreateZoneForm {
+    zone_name: String,
+    content: String,
+}
+
+#[post("/zones/create")]
+async fn create_zone(
+    data: web::Data<AppData>,
+    session: Session,
+    form: web::Form<CreateZoneForm>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    match data.bind9_manager.lock().unwrap().create_zone(&form.zone_name, &form.content) {
+        Ok(_) => {
+            // 创建成功后重新加载BIND9
+            let _ = data.bind9_manager.lock().unwrap().reload();
+            
+            Ok(HttpResponse::Found()
+                .append_header(("Location", "/zones"))
+                .finish())
+        }
+        Err(e) => {
+            error!("Failed to create zone: {}", e);
+            
+            let mut context = Context::new();
+            context.insert("title", t.get("create_zone").unwrap());
+            context.insert("action", "/zones/create");
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+            context.insert("zone_name", &form.zone_name);
+            context.insert("content", &form.content);
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("zones/form.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+// 删除区域
+#[get("/zones/{zone}/delete")]
+async fn delete_zone(
+    data: web::Data<AppData>,
+    session: Session,
+    path: web::Path<String>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let zone_name = path.into_inner();
+    
+    match data.bind9_manager.lock().unwrap().delete_zone(&zone_name) {
+        Ok(_) => {
+            // 删除成功后重新加载BIND9
+            let _ = data.bind9_manager.lock().unwrap().reload();
+            
+            Ok(HttpResponse::Found()
+                .append_header(("Location", "/zones"))
+                .finish())
+        }
+        Err(e) => {
+            error!("Failed to delete zone {}: {}", zone_name, e);
+            
+            let lang = Language::from_request(&req);
+            let t = lang.get_translations();
+            
+            let zones = data.bind9_manager.lock().unwrap().list_zones().unwrap_or_default();
+            
+            let mut context = Context::new();
+            context.insert("title", t.get("zones_title").unwrap());
+            context.insert("zones", &zones);
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("zones/list.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+// 检查区域文件
+#[get("/zones/{zone}/check")]
+async fn check_zone(
+    data: web::Data<AppData>,
+    session: Session,
+    path: web::Path<String>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let zone_name = path.into_inner();
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    let result = data.bind9_manager.lock().unwrap().check_zone(&zone_name);
+    let content = data.bind9_manager.lock().unwrap().read_zone(&zone_name).unwrap_or_default();
+    
+    let mut context = Context::new();
+    context.insert("title", &format!("{}: {}", t.get("zones_title").unwrap(), zone_name));
+    context.insert("zone", &zone_name);
+    context.insert("content", &content);
+    context.insert("t", &t);
+    
+    match result {
+        Ok(msg) => {
+            context.insert("message", &msg);
+        }
+        Err(e) => {
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+        }
+    }
+    
+    let rendered = data.tera.render("zones/edit.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+// 查看区域文件
+#[get("/zones/{zone}")]
+async fn zone_view(
+    data: web::Data<AppData>,
+    session: Session,
+    path: web::Path<String>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let zone = path.into_inner();
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    match data.bind9_manager.lock().unwrap().read_zone(&zone) {
+        Ok(content) => {
+            let mut context = Context::new();
+            context.insert("title", &format!("{}: {}", t.get("zones_title").unwrap(), zone));
+            context.insert("zone", &zone);
+            context.insert("content", &content);
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("zones/edit.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+        Err(e) => {
+            error!("Failed to read zone {}: {}", zone, e);
+            
+            let mut context = Context::new();
+            context.insert("title", t.get("zones_title").unwrap());
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("zones/list.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+// 保存区域文件
+#[derive(Deserialize)]
+struct ZoneForm {
+    content: String,
+}
+
+#[post("/zones/{zone}/save")]
+async fn zone_save(
+    data: web::Data<AppData>,
+    session: Session,
+    path: web::Path<String>,
+    form: web::Form<ZoneForm>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let zone_name = path.into_inner();
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    match data.bind9_manager.lock().unwrap().write_zone(&zone_name, &form.content) {
+        Ok(_) => {
+            // 保存后检查区域文件
+            let check_result = data.bind9_manager.lock().unwrap().check_zone(&zone_name);
+            
+            // 重新加载服务
+            let _ = data.bind9_manager.lock().unwrap().reload();
+            
+            let mut context = Context::new();
+            context.insert("title", &format!("{}: {}", t.get("zones_title").unwrap(), zone_name));
+            context.insert("zone", &zone_name);
+            context.insert("content", &form.content);
+            context.insert("t", &t);
+            
+            match check_result {
+                Ok(msg) => context.insert("message", &msg),
+                Err(e) => context.insert("error", &format!("Saved but error: {}", e)),
+            }
+            
+            let rendered = data.tera.render("zones/edit.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+        Err(e) => {
+            error!("Failed to save zone {}: {}", zone_name, e);
+            
+            let mut context = Context::new();
+            context.insert("title", &format!("{}: {}", t.get("zones_title").unwrap(), zone_name));
+            context.insert("zone", &zone_name);
+            context.insert("content", &form.content);
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("zones/edit.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+// 服务控制
+#[derive(Deserialize)]
+struct ServiceControlForm {
+    action: String,
+}
+
+#[post("/service/control")]
+async fn service_control(
+    data: web::Data<AppData>,
+    session: Session,
+    form: web::Form<ServiceControlForm>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    let result = match form.action.as_str() {
+        "start" => data.bind9_manager.lock().unwrap().start(),
+        "stop" => data.bind9_manager.lock().unwrap().stop(),
+        "restart" => data.bind9_manager.lock().unwrap().restart(),
+        "reload" => data.bind9_manager.lock().unwrap().reload(),
+        _ => Err(anyhow::anyhow!("Unknown action: {}", form.action)),
+    };
+    
+    let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
+    
+    let mut context = Context::new();
+    context.insert("title", t.get("home_title").unwrap());
+    context.insert("status", &bind9_status);
+    context.insert("t", &t);
+    
+    match result {
+        Ok(_) => {
+            context.insert("message", &format!("{}: {}", t.get("success").unwrap(), form.action));
+        }
+        Err(e) => {
+            error!("Service control error: {}", e);
+            context.insert("error", &format!("{}: {}", t.get("error").unwrap(), e));
+        }
+    }
+    
+    let rendered = data.tera.render("index.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+// 用户管理相关处理函数
+#[get("/users")]
+async fn users_list(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    // 检查是否是管理员
+    let current_user = get_current_user(&data, &session).await?;
+    if !current_user.is_admin {
+        let mut context = Context::new();
+        context.insert("title", t.get("error").unwrap());
+        context.insert("error", t.get("access_denied").unwrap());
+        context.insert("t", &t);
+        
+        let rendered = data.tera.render("error.html", &context)
+            .map_err(|e| {
+                error!("Template error: {}", e);
+                ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+            })?;
+        
+        return Ok(HttpResponse::Forbidden().body(rendered));
+    }
+    
+    let users = data.user_store.get_all();
+    
+    let mut context = Context::new();
+    context.insert("title", t.get("users_title").unwrap());
+    context.insert("users", &users);
+    context.insert("t", &t);
+    
+    let rendered = data.tera.render("users/list.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+#[get("/users/create")]
+async fn user_create_form(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    // 检查权限
+    let current_user = get_current_user(&data, &session).await?;
+    if !current_user.is_admin {
+        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
+    }
+    
+    let mut context = Context::new();
+    context.insert("title", t.get("create_user_title").unwrap());
+    context.insert("action", "/users/create");
+    context.insert("t", &t);
+    
+    let rendered = data.tera.render("users/form.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+#[derive(Deserialize)]
+struct CreateUserForm {
+    username: String,
+    password: String,
+    is_admin: Option<String>,  // 复选框会发送"on"或不发送
+}
+
+#[post("/users/create")]
+async fn user_create(
+    data: web::Data<AppData>,
+    session: Session,
+    form: web::Form<CreateUserForm>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    // 检查权限
+    let current_user = get_current_user(&data, &session).await?;
+    if !current_user.is_admin {
+        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
+    }
+    
+    let new_user = auth::NewUser {
+        username: form.username.clone(),
+        password: form.password.clone(),
+        is_admin: form.is_admin.is_some(),
+    };
+    
+    match data.user_store.create(new_user) {
+        Ok(_) => {
+            Ok(HttpResponse::Found()
+                .append_header(("Location", "/users"))
+                .finish())
+        }
+        Err(e) => {
+            let mut context = Context::new();
+            context.insert("title", t.get("create_user_title").unwrap());
+            context.insert("action", "/users/create");
+            context.insert("error", &e);
+            context.insert("username", &form.username);
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("users/form.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+#[get("/users/{id}/edit")]
+async fn user_edit_form(
+    data: web::Data<AppData>,
+    session: Session,
+    path: web::Path<String>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    // 检查权限
+    let current_user = get_current_user(&data, &session).await?;
+    if !current_user.is_admin {
+        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
+    }
+    
+    let user_id = path.into_inner();
+    let user = data.user_store.get_by_id(&user_id)
+        .ok_or_else(|| ActixError::from(actix_web::error::ErrorNotFound(t.get("user_not_found").unwrap())))?;
+    
+    let mut context = Context::new();
+    context.insert("title", t.get("edit_user_title").unwrap());
+    context.insert("action", &format!("/users/{}/update", user_id));
+    context.insert("user", &user);
+    context.insert("t", &t);
+    
+    let rendered = data.tera.render("users/form.html", &context)
+        .map_err(|e| {
+            error!("Template error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+        })?;
+    
+    Ok(HttpResponse::Ok().body(rendered))
+}
+
+#[derive(Deserialize)]
+struct UpdateUserForm {
+    password: Option<String>,
+    is_admin: Option<String>,
+}
+
+#[post("/users/{id}/update")]
+async fn user_update(
+    data: web::Data<AppData>,
+    session: Session,
+    path: web::Path<String>,
+    form: web::Form<UpdateUserForm>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    // 检查权限
+    let current_user = get_current_user(&data, &session).await?;
+    if !current_user.is_admin {
+        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
+    }
+    
+    let user_id = path.into_inner();
+    
+    // 不允许修改自己的管理员权限
+    if current_user.id == user_id && form.is_admin.is_none() {
+        return Ok(HttpResponse::BadRequest().body("Cannot remove admin status from yourself"));
+    }
+    
+    let update = auth::UpdateUser {
+        password: form.password.clone(),
+        is_admin: form.is_admin.clone().map(|_| true).or_else(|| Some(false)),
+    };
+    
+    match data.user_store.update(&user_id, update) {
+        Ok(_) => {
+            Ok(HttpResponse::Found()
+                .append_header(("Location", "/users"))
+                .finish())
+        }
+        Err(e) => {
+            let user = data.user_store.get_by_id(&user_id)
+                .ok_or_else(|| ActixError::from(actix_web::error::ErrorNotFound(t.get("user_not_found").unwrap())))?;
+            
+            let mut context = Context::new();
+            context.insert("title", t.get("edit_user_title").unwrap());
+            context.insert("action", &format!("/users/{}/update", user_id));
+            context.insert("error", &e);
+            context.insert("user", &user);
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("users/form.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+#[get("/users/{id}/delete")]
+async fn user_delete(
+    data: web::Data<AppData>,
+    session: Session,
+    path: web::Path<String>,
+    req: HttpRequest
+) -> Result<impl Responder, ActixError> {
+    let lang = Language::from_request(&req);
+    let t = lang.get_translations();
+    
+    // 检查权限
+    let current_user = get_current_user(&data, &session).await?;
+    if !current_user.is_admin {
+        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
+    }
+    
+    // 不允许删除自己
+    let user_id = path.into_inner();
+    if current_user.id == user_id {
+        return Ok(HttpResponse::BadRequest().body(t.get("cannot_delete_self").unwrap()));
+    }
+    
+    match data.user_store.delete(&user_id) {
+        Ok(_) => {
+            Ok(HttpResponse::Found()
+                .append_header(("Location", "/users"))
+                .finish())
+        }
+        Err(e) => {
+            let users = data.user_store.get_all();
+            
+            let mut context = Context::new();
+            context.insert("title", t.get("users_title").unwrap());
+            context.insert("users", &users);
+            context.insert("error", &e);
+            context.insert("t", &t);
+            
+            let rendered = data.tera.render("users/list.html", &context)
+                .map_err(|e| {
+                    error!("Template error: {}", e);
+                    ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+                })?;
+            
+            Ok(HttpResponse::Ok().body(rendered))
+        }
+    }
+}
+
+// 辅助函数：获取当前登录用户
+async fn get_current_user(data: &web::Data<AppData>, session: &Session) -> Result<User, ActixError> {
+    let username = session.get::<String>("username")
+        .map_err(|e| {
+            error!("Session error: {}", e);
+            ActixError::from(actix_web::error::ErrorInternalServerError("Session error"))
+        })?
+        .ok_or_else(|| {
+            ActixError::from(actix_web::error::ErrorUnauthorized("Not authenticated"))
+        })?;
+    
+    data.user_store.get_by_username(&username)
+        .ok_or_else(|| {
+            ActixError::from(actix_web::error::ErrorUnauthorized("User not found"))
+        })
 }
