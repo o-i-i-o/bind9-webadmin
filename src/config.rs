@@ -1,47 +1,68 @@
 use serde::Deserialize;
 use std::fs;
-use anyhow::{Result, Context};
+use std::path::Path;
+use log::warn;
 
-// 服务器配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct Config {
+    pub server: ServerConfig,
+    pub auth: AuthConfig,
+    pub bind9: Bind9Config,
+    #[serde(default)]
+    pub session: SessionConfig,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
-    pub address: String,
+    pub host: String,
     pub port: u16,
 }
 
-// BIND9配置
-#[derive(Debug, Deserialize, Clone)]
-pub struct Bind9Config {
-    pub service_name: String,
-    pub binary_path: String,
-    pub config_path: String,
-    pub zones_dir: String,
-}
-
-// 认证配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthConfig {
     pub username: String,
     pub password_hash: String,
 }
 
-// 应用配置
 #[derive(Debug, Deserialize, Clone)]
-pub struct Config {
-    pub server: ServerConfig,
-    pub bind9: Bind9Config,
-    pub auth: AuthConfig,
+pub struct Bind9Config {
+    pub config_path: String,
+    pub zones_path: String,
+    pub service_name: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SessionConfig {
+    pub secret: Option<String>,
 }
 
 impl Config {
-    // 从文件加载配置（使用toml crate）
-    pub fn from_file(path: &str) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config file: {}", path))?;
-        
-        let config = toml::from_str(&content)
-            .context("Failed to parse config file")?;
-        
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = fs::read_to_string(path)?;
+        let config: Config = toml::from_str(&contents)?;
         Ok(config)
+    }
+    
+    // 获取会话密钥，优先使用配置文件，其次使用环境变量，最后使用默认值
+    pub fn get_session_secret(&self) -> String {
+        // 1. 尝试从配置文件获取
+        if let Some(secret) = &self.session.secret {
+            if secret.len() >= 32 {
+                return secret.clone();
+            }
+            warn!("Session secret in config file is too short (minimum 32 characters)");
+        }
+        
+        // 2. 尝试从环境变量获取
+        if let Ok(secret) = std::env::var("SESSION_SECRET") {
+            if secret.len() >= 32 {
+                return secret;
+            }
+            warn!("SESSION_SECRET environment variable is too short (minimum 32 characters)");
+        }
+        
+        // 3. 使用默认密钥（仅用于开发环境）
+        warn!("Using default session secret - THIS IS INSECURE FOR PRODUCTION!");
+        "default-secret-key-12345678901234567890123456789012".to_string()
     }
 }
