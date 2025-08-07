@@ -31,7 +31,8 @@ pub struct Bind9Config {
     pub service_name: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+// 添加Default trait派生以修复serde(default)问题
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct SessionConfig {
     pub secret: Option<String>,
 }
