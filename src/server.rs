@@ -4,7 +4,7 @@ use actix_web::{
 use actix_session::{
     Session, SessionMiddleware, storage::CookieSessionStore
 };
-use actix_web_redis::RedisSessionStore;  // 使用正确的Redis会话存储
+use actix_session::storage::RedisSessionStore;  // 使用actix-redis替代actix-web-redis
 use actix_web::cookie::{Key, SameSite};
 use actix_files::Files;
 use serde::Deserialize;
@@ -122,7 +122,7 @@ pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>
         // 生产环境：使用Redis存储会话
         info!("Using Redis session store: {}", app_data.config.redis.url);
         SessionMiddleware::builder(
-            RedisSessionStore::new(&app_data.config.redis.url)
+            RedisSessionStore::new(&app_data.config.redis.url).await
                 .expect("Failed to connect to Redis"),
             Key::from(&app_data.config.get_session_secret().into_bytes())
         )
