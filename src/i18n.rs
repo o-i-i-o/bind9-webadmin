@@ -1,9 +1,10 @@
 use actix_web::HttpRequest;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use lazy_static::lazy_static;
 
 // 定义支持的语言
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     Chinese,
     English,
@@ -21,7 +22,7 @@ impl Language {
             }
         }
         // 默认英文
-        Language::English
+        Language::Chinese
     }
     
     // 获取对应的翻译映射
@@ -33,7 +34,7 @@ impl Language {
     }
 }
 
-// 英文翻译
+// 英文翻译 - 使用RwLock保护，支持动态更新
 lazy_static! {
     static ref ENGLISH_TRANSLATIONS: HashMap<&'static str, &'static str> = {
         let mut map = HashMap::new();
@@ -83,7 +84,12 @@ lazy_static! {
         map.insert("admin_desc", "Admin users have full access to all features");
         map.insert("password_placeholder", "Leave empty to keep current password");
         map.insert("new_password_placeholder", "Enter password");
-        map.insert("config_hint", "Zone files can be managed at: http://192.168.6.253:8080/zones");
+        map.insert("config_hint", "Zone files can be managed at: /zones");
+        map.insert("create_zone", "Create New Zone");
+        map.insert("zone_content", "Zone Content");
+        map.insert("check_config", "Check Configuration");
+        map.insert("config_valid", "Configuration is valid");
+        map.insert("view_logs", "View Logs");
         
         map
     };
@@ -137,7 +143,12 @@ lazy_static! {
         map.insert("admin_desc", "管理员用户拥有所有功能的完全访问权限");
         map.insert("password_placeholder", "留空则保持当前密码");
         map.insert("new_password_placeholder", "输入密码");
-        map.insert("config_hint", "区域文件可在以下地址管理：http://192.168.6.253:8080/zones");
+        map.insert("config_hint", "区域文件可在以下地址管理：/zones");
+        map.insert("create_zone", "创建新区域");
+        map.insert("zone_content", "区域内容");
+        map.insert("check_config", "检查配置");
+        map.insert("config_valid", "配置有效");
+        map.insert("view_logs", "查看日志");
         
         map
     };
