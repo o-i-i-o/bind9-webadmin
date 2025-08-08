@@ -1,5 +1,5 @@
-use actix_web::{HttpServer, App};
 use std::env;
+use actix_web::{App, HttpServer};
 use log::{info, error};
 use tokio::runtime::Runtime;
 
@@ -45,7 +45,7 @@ fn main() -> std::io::Result<()> {
         HttpServer::new(move || {
             App::new()
                 .app_data(app_data.clone())
-                .configure(|cfg| server::config_routes(cfg, &app_data))
+                .configure_async(|cfg| server::config_routes(cfg, &app_data))
         })
         .bind(&server_address)?
         .run()
