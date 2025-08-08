@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 actix-web = "4.4"
 actix-session = { version = "0.10", features = ["cookie-session"] }
-actix-redis-session = "0.10"  # Redis会话存储支持
+actix-web-redis = { version = "0.10", features = ["session"] }  # 正确的Redis会话依赖
 actix-files = "0.6"
 tera = "1.19"
 serde = { version = "1.0", features = ["derive"] }
@@ -28,4 +28,4 @@ opt-level = 3          # 最高优化级别
 lto = true             # 链接时优化
 codegen-units = 1      # 单代码生成单元，优化更彻底
 panic = "abort"        # panic时直接终止，减少错误处理开销
-strip = false           # 是否剥离调试符号，减小二进制大小
+strip = false          # 是否剥离调试符号，减小二进制大小
