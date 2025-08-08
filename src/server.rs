@@ -2,14 +2,17 @@ use actix_web::{
     get, post, web, HttpResponse, Responder, Error as ActixError, HttpRequest,
 };
 use actix_session::{
-    Session, SessionMiddleware, storage::CookieStore
+    Session, SessionMiddleware, storage::CookieSessionStore
 };
+use actix_redis_session::RedisSessionStore;
 use actix_web::cookie::{Key, SameSite};
 use actix_files::Files;
 use serde::Deserialize;
-use std::sync::{Mutex, Arc};
+use std::sync::Arc;
 use tera::{Tera, Context};
 use log::{error, info};
+use std::time::Duration;
+use parking_lot::RwLock;
 
 // 导入本地模块
 use super::{
@@ -24,21 +27,38 @@ use super::{
 pub struct AppData {
     pub config: Config,
     pub tera: Tera,
-    pub bind9_manager: Arc<Mutex<Bind9Manager>>,
+    pub bind9_manager: Arc<RwLock<Bind9Manager>>,
     pub user_store: UserStore,
 }
 
-// 创建应用数据
-pub fn create_app_data(config: Config) -> web::Data<AppData> {
-    let tera = match Tera::new("templates/**/*.html") {
-        Ok(t) => t,
-        Err(e) => {
-            error!("Failed to initialize Tera: {}", e);
-            std::process::exit(1);
+// 创建应用数据（异步版本）
+pub async fn create_app_data(config: Config) -> web::Data<AppData> {
+    // 初始化模板引擎（开发/生产环境不同配置）
+    let tera = if cfg!(debug_assertions) {
+        // 开发环境：实时重新加载模板
+        match Tera::new("templates/**/*.html") {
+            Ok(t) => t,
+            Err(e) => {
+                error!("Failed to initialize Tera: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // 生产环境：预编译模板并禁用自动重新加载
+        match Tera::new("templates/**/*.html") {
+            Ok(mut t) => {
+                t.auto_reload(false);
+                t
+            }
+            Err(e) => {
+                error!("Failed to initialize Tera: {}", e);
+                std::process::exit(1);
+            }
         }
     };
     
-    let bind9_manager = Arc::new(Mutex::new(Bind9Manager::new(config.clone())));
+    // 创建BIND9管理器
+    let bind9_manager = Arc::new(RwLock::new(Bind9Manager::new(config.clone())));
     
     // 初始化用户存储并添加默认管理员
     let user_store = UserStore::new();
@@ -55,8 +75,17 @@ pub fn create_app_data(config: Config) -> web::Data<AppData> {
     })
 }
 
+// 获取当前登录用户
+async fn get_current_user(data: &web::Data<AppData>, session: &Session) -> Result<User, ActixError> {
+    let username = session.get::<String>("username")?
+        .ok_or_else(|| ActixError::from(actix_web::error::ErrorUnauthorized("Not authenticated")))?;
+        
+    data.user_store.get_by_username(&username)
+        .ok_or_else(|| ActixError::from(actix_web::error::ErrorUnauthorized("User not found")))
+}
+
 // 认证中间件
-pub fn auth_middleware(
+pub async fn auth_middleware(
     session: Session,
     req: HttpRequest,
 ) -> Result<(), ActixError> {
@@ -72,20 +101,53 @@ pub fn auth_middleware(
     Ok(())
 }
 
+// 管理员权限中间件
+pub async fn admin_middleware(
+    data: web::Data<AppData>,
+    session: Session,
+) -> Result<(), ActixError> {
+    let user = get_current_user(&data, &session).await?;
+    if !user.is_admin {
+        return Err(ActixError::from(
+            actix_web::error::ErrorForbidden("Admin privileges required")
+        ));
+    }
+    Ok(())
+}
+
 // 路由配置
 pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>) {
+    // 根据配置选择会话存储（Redis或Cookie）
+    let session_middleware = if !app_data.config.redis.url.is_empty() {
+        // 生产环境：使用Redis存储会话
+        info!("Using Redis session store: {}", app_data.config.redis.url);
+        SessionMiddleware::builder(
+            RedisSessionStore::new(&app_data.config.redis.url)
+                .expect("Failed to connect to Redis"),
+            Key::from(&app_data.config.get_session_secret().into_bytes())
+        )
+        .cookie_secure(cfg!(not(debug_assertions))) // 生产环境启用HTTPS
+        .cookie_http_only(true)
+        .cookie_same_site(SameSite::Lax)
+        .session_ttl(Some(Duration::hours(app_data.config.get_session_ttl())))
+        .build()
+    } else {
+        // 开发环境：使用Cookie存储会话
+        info!("Using cookie session store (for development only)");
+        SessionMiddleware::builder(
+            CookieSessionStore::default(),
+            Key::from(&app_data.config.get_session_secret().into_bytes())
+        )
+        .cookie_secure(false)  // 开发环境使用false
+        .cookie_http_only(true)
+        .cookie_same_site(SameSite::Lax)
+        .session_ttl(Some(Duration::hours(app_data.config.get_session_ttl())))
+        .build()
+    };
+    
     cfg.service(
         web::scope("")
-            .wrap(
-                SessionMiddleware::builder(
-                    CookieStore::default(),
-                    Key::from(&app_data.config.get_session_secret().into_bytes())
-                )
-                .cookie_secure(false)  // 开发环境使用false，生产环境应改为true（需要HTTPS）
-                .cookie_http_only(true)
-                .cookie_same_site(SameSite::Lax)
-                .build()
-            )
+            .wrap(session_middleware)
             .service(index)
             .service(status)
             .service(login)
@@ -101,26 +163,27 @@ pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>
             // 需要认证的路由
             .service(
                 web::scope("")
-                    .wrap_fn(|req, srv| {
-                        let session = req.get_session();
-                        let result = auth_middleware(session.clone(), req.clone());
-                        match result {
-                            Ok(_) => srv.call(req),
-                            Err(e) => async { Err(e) },
-                        }
-                    })
+                    .wrap(web::middleware::from_fn(auth_middleware))
                     .service(config_view)
                     .service(config_save)
                     .service(zone_list)
                     .service(zone_view)
                     .service(zone_save)
                     .service(service_control)
-                    .service(users_list)
-                    .service(user_create_form)
-                    .service(user_create)
-                    .service(user_edit_form)
-                    .service(user_update)
-                    .service(user_delete)
+                    // 需要管理员权限的路由
+                    .service(
+                        web::scope("")
+                            .wrap(web::middleware::from_fn_with_state(
+                                app_data.clone(), 
+                                admin_middleware
+                            ))
+                            .service(users_list)
+                            .service(user_create_form)
+                            .service(user_create)
+                            .service(user_edit_form)
+                            .service(user_update)
+                            .service(user_delete)
+                    )
             )
             .service(Files::new("/static", "static").show_files_listing())
     );
@@ -132,12 +195,16 @@ async fn index(data: web::Data<AppData>, session: Session, req: HttpRequest) -> 
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
-    
+    // 复用上下文对象
     let mut context = Context::new();
     context.insert("title", t.get("home_title").unwrap());
-    context.insert("status", &bind9_status);
     context.insert("t", &t);
+    
+    // 读取服务状态
+    let bind9 = data.bind9_manager.read();
+    let bind9_status = bind9.get_status().await.unwrap_or_default();
+    context.insert("status", &bind9_status);
+    drop(bind9);  // 提前释放读锁
     
     let rendered = data.tera.render("index.html", &context)
         .map_err(|e| {
@@ -190,7 +257,8 @@ async fn authenticate(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    if auth::verify_credentials(&data.user_store, &form.username, &form.password) {
+    // 异步验证凭据
+    if auth::verify_credentials(&data.user_store, &form.username, &form.password).await {
         auth::set_authenticated(&session, &form.username)?;
         
         // 检查是否有需要返回的URL
@@ -236,7 +304,8 @@ async fn status(data: web::Data<AppData>, session: Session) -> Result<impl Respo
         return Ok(HttpResponse::Unauthorized().body("Not authenticated"));
     }
     
-    let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
+    let bind9 = data.bind9_manager.read();
+    let bind9_status = bind9.get_status().await.unwrap_or_default();
     Ok(HttpResponse::Ok().body(bind9_status))
 }
 
@@ -246,7 +315,8 @@ async fn config_view(data: web::Data<AppData>, session: Session, req: HttpReques
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    match data.bind9_manager.lock().unwrap().read_config() {
+    let bind9 = data.bind9_manager.read();
+    match bind9.read_config().await {
         Ok(content) => {
             let mut context = Context::new();
             context.insert("title", t.get("config_title").unwrap());
@@ -297,17 +367,18 @@ async fn config_save(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    match data.bind9_manager.lock().unwrap().write_config(&form.content) {
+    let mut bind9 = data.bind9_manager.write();
+    match bind9.write_config(&form.content).await {
         Ok(_) => {
             // 保存后检查配置
-            let check_result = data.bind9_manager.lock().unwrap().check_config();
+            let check_result = bind9.check_config().await;
             let message = match check_result {
                 Ok(msg) => msg,
                 Err(e) => format!("Saved but configuration error: {}", e),
             };
             
             // 重新加载服务
-            let _ = data.bind9_manager.lock().unwrap().reload();
+            let _ = bind9.reload().await;
             
             let mut context = Context::new();
             context.insert("title", t.get("config_title").unwrap());
@@ -350,9 +421,9 @@ async fn check_config(data: web::Data<AppData>, session: Session, req: HttpReque
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    let result = data.bind9_manager.lock().unwrap().check_config();
-    
-    let content = data.bind9_manager.lock().unwrap().read_config().unwrap_or_default();
+    let bind9 = data.bind9_manager.read();
+    let result = bind9.check_config().await;
+    let content = bind9.read_config().await.unwrap_or_default();
     
     let mut context = Context::new();
     context.insert("title", t.get("config_title").unwrap());
@@ -384,7 +455,8 @@ async fn view_logs(data: web::Data<AppData>, session: Session, req: HttpRequest)
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    let logs = match data.bind9_manager.lock().unwrap().get_logs() {
+    let bind9 = data.bind9_manager.read();
+    let logs = match bind9.get_logs().await {
         Ok(logs) => logs,
         Err(e) => {
             error!("Failed to get logs: {}", e);
@@ -412,7 +484,8 @@ async fn zone_list(data: web::Data<AppData>, session: Session, req: HttpRequest)
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    match data.bind9_manager.lock().unwrap().list_zones() {
+    let bind9 = data.bind9_manager.read();
+    match bind9.list_zones().await {
         Ok(zones) => {
             let mut context = Context::new();
             context.insert("title", t.get("zones_title").unwrap());
@@ -483,10 +556,11 @@ async fn create_zone(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    match data.bind9_manager.lock().unwrap().create_zone(&form.zone_name, &form.content) {
+    let mut bind9 = data.bind9_manager.write();
+    match bind9.create_zone(&form.zone_name, &form.content).await {
         Ok(_) => {
             // 创建成功后重新加载BIND9
-            let _ = data.bind9_manager.lock().unwrap().reload();
+            let _ = bind9.reload().await;
             
             Ok(HttpResponse::Found()
                 .append_header(("Location", "/zones"))
@@ -524,10 +598,11 @@ async fn delete_zone(
 ) -> Result<impl Responder, ActixError> {
     let zone_name = path.into_inner();
     
-    match data.bind9_manager.lock().unwrap().delete_zone(&zone_name) {
+    let mut bind9 = data.bind9_manager.write();
+    match bind9.delete_zone(&zone_name).await {
         Ok(_) => {
             // 删除成功后重新加载BIND9
-            let _ = data.bind9_manager.lock().unwrap().reload();
+            let _ = bind9.reload().await;
             
             Ok(HttpResponse::Found()
                 .append_header(("Location", "/zones"))
@@ -539,7 +614,8 @@ async fn delete_zone(
             let lang = Language::from_request(&req);
             let t = lang.get_translations();
             
-            let zones = data.bind9_manager.lock().unwrap().list_zones().unwrap_or_default();
+            let bind9 = data.bind9_manager.read();
+            let zones = bind9.list_zones().await.unwrap_or_default();
             
             let mut context = Context::new();
             context.insert("title", t.get("zones_title").unwrap());
@@ -570,8 +646,9 @@ async fn check_zone(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    let result = data.bind9_manager.lock().unwrap().check_zone(&zone_name);
-    let content = data.bind9_manager.lock().unwrap().read_zone(&zone_name).unwrap_or_default();
+    let bind9 = data.bind9_manager.read();
+    let result = bind9.check_zone(&zone_name).await;
+    let content = bind9.read_zone(&zone_name).await.unwrap_or_default();
     
     let mut context = Context::new();
     context.insert("title", &format!("{}: {}", t.get("zones_title").unwrap(), zone_name));
@@ -609,7 +686,8 @@ async fn zone_view(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    match data.bind9_manager.lock().unwrap().read_zone(&zone) {
+    let bind9 = data.bind9_manager.read();
+    match bind9.read_zone(&zone).await {
         Ok(content) => {
             let mut context = Context::new();
             context.insert("title", &format!("{}: {}", t.get("zones_title").unwrap(), zone));
@@ -662,13 +740,14 @@ async fn zone_save(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    match data.bind9_manager.lock().unwrap().write_zone(&zone_name, &form.content) {
+    let mut bind9 = data.bind9_manager.write();
+    match bind9.write_zone(&zone_name, &form.content).await {
         Ok(_) => {
             // 保存后检查区域文件
-            let check_result = data.bind9_manager.lock().unwrap().check_zone(&zone_name);
+            let check_result = bind9.check_zone(&zone_name).await;
             
             // 重新加载服务
-            let _ = data.bind9_manager.lock().unwrap().reload();
+            let _ = bind9.reload().await;
             
             let mut context = Context::new();
             context.insert("title", &format!("{}: {}", t.get("zones_title").unwrap(), zone_name));
@@ -726,15 +805,16 @@ async fn service_control(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
+    let mut bind9 = data.bind9_manager.write();
     let result = match form.action.as_str() {
-        "start" => data.bind9_manager.lock().unwrap().start(),
-        "stop" => data.bind9_manager.lock().unwrap().stop(),
-        "restart" => data.bind9_manager.lock().unwrap().restart(),
-        "reload" => data.bind9_manager.lock().unwrap().reload(),
+        "start" => bind9.start().await,
+        "stop" => bind9.stop().await,
+        "restart" => bind9.restart().await,
+        "reload" => bind9.reload().await,
         _ => Err(anyhow::anyhow!("Unknown action: {}", form.action)),
     };
     
-    let bind9_status = data.bind9_manager.lock().unwrap().get_status().unwrap_or_default();
+    let bind9_status = bind9.get_status().await.unwrap_or_default();
     
     let mut context = Context::new();
     context.insert("title", t.get("home_title").unwrap());
@@ -766,23 +846,6 @@ async fn users_list(data: web::Data<AppData>, session: Session, req: HttpRequest
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    // 检查是否是管理员
-    let current_user = get_current_user(&data, &session).await?;
-    if !current_user.is_admin {
-        let mut context = Context::new();
-        context.insert("title", t.get("error").unwrap());
-        context.insert("error", t.get("access_denied").unwrap());
-        context.insert("t", &t);
-        
-        let rendered = data.tera.render("error.html", &context)
-            .map_err(|e| {
-                error!("Template error: {}", e);
-                ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
-            })?;
-        
-        return Ok(HttpResponse::Forbidden().body(rendered));
-    }
-    
     let users = data.user_store.get_all();
     
     let mut context = Context::new();
@@ -803,12 +866,6 @@ async fn users_list(data: web::Data<AppData>, session: Session, req: HttpRequest
 async fn user_create_form(data: web::Data<AppData>, session: Session, req: HttpRequest) -> Result<impl Responder, ActixError> {
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
-    
-    // 检查权限
-    let current_user = get_current_user(&data, &session).await?;
-    if !current_user.is_admin {
-        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
-    }
     
     let mut context = Context::new();
     context.insert("title", t.get("create_user_title").unwrap());
@@ -841,19 +898,13 @@ async fn user_create(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    // 检查权限
-    let current_user = get_current_user(&data, &session).await?;
-    if !current_user.is_admin {
-        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
-    }
-    
     let new_user = auth::NewUser {
         username: form.username.clone(),
         password: form.password.clone(),
         is_admin: form.is_admin.is_some(),
     };
     
-    match data.user_store.create(new_user) {
+    match data.user_store.create(new_user).await {
         Ok(_) => {
             Ok(HttpResponse::Found()
                 .append_header(("Location", "/users"))
@@ -887,12 +938,6 @@ async fn user_edit_form(
 ) -> Result<impl Responder, ActixError> {
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
-    
-    // 检查权限
-    let current_user = get_current_user(&data, &session).await?;
-    if !current_user.is_admin {
-        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
-    }
     
     let user_id = path.into_inner();
     let user = data.user_store.get_by_id(&user_id)
@@ -930,13 +975,8 @@ async fn user_update(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    // 检查权限
-    let current_user = get_current_user(&data, &session).await?;
-    if !current_user.is_admin {
-        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
-    }
-    
     let user_id = path.into_inner();
+    let current_user = get_current_user(&data, &session).await?;
     
     // 不允许修改自己的管理员权限
     if current_user.id == user_id && form.is_admin.is_none() {
@@ -986,16 +1026,27 @@ async fn user_delete(
     let lang = Language::from_request(&req);
     let t = lang.get_translations();
     
-    // 检查权限
+    // 获取当前用户
     let current_user = get_current_user(&data, &session).await?;
-    if !current_user.is_admin {
-        return Ok(HttpResponse::Forbidden().body(t.get("access_denied").unwrap()));
-    }
     
     // 不允许删除自己
     let user_id = path.into_inner();
     if current_user.id == user_id {
-        return Ok(HttpResponse::BadRequest().body(t.get("cannot_delete_self").unwrap()));
+        let users = data.user_store.get_all();
+        
+        let mut context = Context::new();
+        context.insert("title", t.get("users_title").unwrap());
+        context.insert("users", &users);
+        context.insert("error", t.get("cannot_delete_self").unwrap());
+        context.insert("t", &t);
+        
+        let rendered = data.tera.render("users/list.html", &context)
+            .map_err(|e| {
+                error!("Template error: {}", e);
+                ActixError::from(actix_web::error::ErrorInternalServerError("Template rendering error"))
+            })?;
+        
+        return Ok(HttpResponse::Ok().body(rendered));
     }
     
     match data.user_store.delete(&user_id) {
@@ -1022,21 +1073,4 @@ async fn user_delete(
             Ok(HttpResponse::Ok().body(rendered))
         }
     }
-}
-
-// 辅助函数：获取当前登录用户
-async fn get_current_user(data: &web::Data<AppData>, session: &Session) -> Result<User, ActixError> {
-    let username = session.get::<String>("username")
-        .map_err(|e| {
-            error!("Session error: {}", e);
-            ActixError::from(actix_web::error::ErrorInternalServerError("Session error"))
-        })?
-        .ok_or_else(|| {
-            ActixError::from(actix_web::error::ErrorUnauthorized("Not authenticated"))
-        })?;
-    
-    data.user_store.get_by_username(&username)
-        .ok_or_else(|| {
-            ActixError::from(actix_web::error::ErrorUnauthorized("User not found"))
-        })
 }
