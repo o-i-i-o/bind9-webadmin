@@ -4,7 +4,7 @@ use actix_web::{
 use actix_session::{
     Session, SessionMiddleware, storage::CookieSessionStore
 };
-use actix_redis_session::RedisSessionStore;
+use actix_web_redis::RedisSessionStore;  // 使用正确的Redis会话存储
 use actix_web::cookie::{Key, SameSite};
 use actix_files::Files;
 use serde::Deserialize;
