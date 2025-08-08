@@ -1,4 +1,4 @@
-use actix_web::{
+use actix_web::{middleware, 
     get, post, web, HttpResponse, Responder, Error as ActixError, HttpRequest,
 };
 use actix_session::{
@@ -47,7 +47,7 @@ pub async fn create_app_data(config: Config) -> web::Data<AppData> {
         // 生产环境：预编译模板并禁用自动重新加载
         match Tera::new("templates/**/*.html") {
             Ok(mut t) => {
-                t.auto_reload(false);
+                // 生产环境不启用自动重载，Tera 1.20.0版本不支持auto_reload方法
                 t
             }
             Err(e) => {
@@ -95,7 +95,7 @@ pub async fn auth_middleware(
         session.insert("return_url", return_url)?;
         
         return Err(ActixError::from(
-            actix_web::error::ErrorFound("/login")
+            actix_web::error::ErrorRedirect("/login")
         ));
     }
     Ok(())
@@ -116,7 +116,7 @@ pub async fn admin_middleware(
 }
 
 // 路由配置
-pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>) {
+pub async fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>) {
     // 根据配置选择会话存储（Redis或Cookie）
     let session_middleware = if !app_data.config.redis.url.is_empty() {
         // 生产环境：使用Redis存储会话
@@ -163,7 +163,7 @@ pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>
             // 需要认证的路由
             .service(
                 web::scope("")
-                    .wrap(web::middleware::from_fn(auth_middleware))
+                    .wrap(middleware::from_fn(auth_middleware))
                     .service(config_view)
                     .service(config_save)
                     .service(zone_list)
@@ -173,7 +173,7 @@ pub fn config_routes(cfg: &mut web::ServiceConfig, app_data: &web::Data<AppData>
                     // 需要管理员权限的路由
                     .service(
                         web::scope("")
-                            .wrap(web::middleware::from_fn_with_state(
+                            .wrap(middleware::from_fn_with_state(
                                 app_data.clone(), 
                                 admin_middleware
                             ))
@@ -465,7 +465,7 @@ async fn view_logs(data: web::Data<AppData>, session: Session, req: HttpRequest)
     };
     
     let mut context = Context::new();
-    context.insert("title", "BIND9 Logs");
+    context.insert("title", t.get("logs_title").unwrap());
     context.insert("logs", &logs);
     context.insert("t", &t);
     
