@@ -4,14 +4,17 @@ port = 8080
 
 [auth]
 username = "admin"
-# 默认密码是 "admin" - 请在首次登录后立即更改
-password_hash = "$2b$12$x0qQZ8U8L6gA7lM7g7lM7eO3GQdJjD6Z6X6Y6W6V6U6T6S6R6Q6P"
+password_hash = "$2b$12$VQ5q6eMNG9aY57o4N9fS4O5wM8JQd3QZ9QZ9QZ9QZ9QZ9QZ9QZ9Q"  # 示例哈希，实际使用时请替换
 
 [bind9]
 config_path = "/etc/bind/named.conf"
-zones_path = "/etc/bind/zones/"
+zones_path = "/var/lib/bind"
 service_name = "bind9"
 
 [session]
-# 请替换为你自己的32字符以上的随机密钥
-secret = "4kQqoPlg3nvUrJbPKmPjqhmJ9QTe2R81EMUylDLbzlcUlbNOjzqf166ZnSCxvW5e0rK&MzcP&rQe8DCRbf8%WuaZ&q!05KFO"
+secret = "yosur-sesfcure-secrset-key-with-dsfdsgat-least-32-charafcters"  # 生产环境请更换为安全密钥
+ttl_hours = 24  # 会话有效期24小时
+
+[redis]
+url = "redis://127.0.0.1:6379"  # Redis服务器地址，留空则使用Cookie存储
+database = 0  # Redis数据库编号
