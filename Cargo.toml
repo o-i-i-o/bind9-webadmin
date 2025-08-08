@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 actix-web = "4.4"
-actix-session = { version = "0.10", features = ["cookie"] }
+actix-session = { version = "0.10", features = ["cookie-session"] }
+actix-redis-session = "0.10"  # Redis会话存储支持
 actix-files = "0.6"
 tera = "1.19"
 serde = { version = "1.0", features = ["derive"] }
@@ -17,3 +18,14 @@ env_logger = "0.10"
 rand = "0.8"
 lazy_static = "1.4"
 chrono = "0.4"
+uuid = "1.4"
+tokio = { version = "1.0", features = ["full"] }  # 异步运行时
+lru-cache = "0.1.2"  # LRU缓存
+parking_lot = "0.12"  # 更高效的同步原语
+
+[profile.release]
+opt-level = 3          # 最高优化级别
+lto = true             # 链接时优化
+codegen-units = 1      # 单代码生成单元，优化更彻底
+panic = "abort"        # panic时直接终止，减少错误处理开销
+strip = false           # 是否剥离调试符号，减小二进制大小
